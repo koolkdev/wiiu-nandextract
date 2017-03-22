@@ -49,6 +49,22 @@ namespace NAND_Extractor
             public UInt32 x3;
         }
 
+        /*
+         * Enums.
+         */
+        public enum FileType
+        {
+            Invalid,
+            NoECC,
+            ECC,
+            BootMii
+        }
+
+        public enum NandType
+        {
+            Wii,
+            WiiU
+        }
 
         /*
          * Globals.
@@ -61,8 +77,15 @@ namespace NAND_Extractor
         public static Int32 loc_fst;
         public static string nandFilename;
         public static string extractPath;
-        public static int type = -1;
+        public static FileType fileType = FileType.Invalid;
+        public static NandType nandType;
 
+        /*
+         * Constants 
+         */
+        private const Int32 PAGE_SIZE = 0x800;
+        private const Int32 SPARE_SIZE = 0x40;
+        private const UInt16 CLUSTERS_COUNT = 0x8000;
 
         /*
          * Core functions.
@@ -121,85 +144,127 @@ namespace NAND_Extractor
                                     Encoding.ASCII);
 
                 
-            type = getDumpType(rom.BaseStream.Length);
-            
-            if ( getKey(type) )
-            {
-                //Console.WriteLine(BitConverter.ToString(key).Replace("-", string.Empty));
+            if (!getFileType() || !getNandType() || !getKey())
+                return false;
 
-                try
-                {
-                    loc_super = findSuperblock();
-                }
-                catch
-                {
-                    statusText("Invalid or non-ECC NAND dump");
-                    fileView.Nodes.Clear();
-                    msg_Error("Can't find superblock.\nAre you sure this is a Full (with ECC) or BootMii NAND dump?");
+            //Console.WriteLine(BitConverter.ToString(key).Replace("-", string.Empty));
+
+            try
+            {
+                loc_super = findSuperblock();
+            }
+            catch
+            {
+                loc_super = -1;
+            }
+            if (loc_super == -1)
+            {
+                statusText("Invalid or non-ECC NAND dump");
+                fileView.Nodes.Clear();
+                msg_Error("Can't find superblock.\nAre you sure this is a Full (with ECC) or BootMii NAND dump?");
+                return false;
+            }
+
+            //Console.WriteLine("Superblock @ {0}", loc_super);
+
+            Int32 fatlen = getClusterSize() * 4;
+            loc_fat = loc_super;
+            loc_fst = loc_fat + 0x0C + fatlen;
+            return true;
+        }
+
+        private Int32 getPageSize()
+        {
+            if (fileType == FileType.NoECC)
+            {
+                return PAGE_SIZE;
+            }
+            else
+            {
+                return PAGE_SIZE + SPARE_SIZE;
+            }
+        }
+
+
+        private Int32 getClusterSize()
+        {
+            return getPageSize() * 8;
+        }
+
+        private bool getFileType()
+        {
+            switch (rom.BaseStream.Length)
+            {
+                case PAGE_SIZE * 8 * CLUSTERS_COUNT:
+                    fileType = FileType.NoECC;
+                    return true;
+                case (PAGE_SIZE + SPARE_SIZE) * 8 * CLUSTERS_COUNT:
+                    fileType = FileType.ECC;
+                    return true;
+                case (PAGE_SIZE + SPARE_SIZE) * 8 * CLUSTERS_COUNT + 0x400:
+                    fileType = FileType.BootMii;
+                    return true;
+                default:
                     return false;
-                }
-
-                //Console.WriteLine("Superblock @ {0}", loc_super);
-
-                Int32[] n_fatlen = { 0x010000, 0x010800, 0x010800 };
-                loc_fat = loc_super;
-                loc_fst = loc_fat + 0x0C + n_fatlen[type];
-                return true;
-
             }
-            return false;
         }
 
-        private int getDumpType(Int64 FileSize)
+        private bool getNandType()
         {
-            Int64[] sizes = { 536870912,    // type 0 | 536870912 == no ecc
-                              553648128,    // type 1 | 553648128 == ecc
-                              553649152 };  // type 2 | 553649152 == old bootmii
-            for (int i = 0; i < sizes.Count(); i++)
-                if (sizes[i] == FileSize)
-                    return i;
-            return -1;
-        }
+            // Go to last cluster
+            rom.BaseStream.Seek(getClusterSize() * 0x7FF0, SeekOrigin.Begin);
 
-        private bool getKey(int type)
-        {
-            switch (type)
+            // Read cluster magic
+            switch (bswap(rom.ReadUInt32()))
             {
-                case 0:
-                    key = readKeyfile(Directory.GetCurrentDirectory() + "\\keys.bin");
-                    if (key != null)
-                        return true;
-                    break;
-                
-                case 1:
-                    key = readKeyfile(Directory.GetCurrentDirectory() + "\\keys.bin");
-                    if (key != null)
-                        return true;
-                    break;
-                
-                case 2:
-                    rom.BaseStream.Seek(0x21000158, SeekOrigin.Begin);
-                    if (rom.Read(key, 0, 16) > 0)
-                        return true;
-                    break;
+                case 0x53464653: // SFFS
+                    nandType = NandType.Wii;
+                    return true;
+                case 0x53465321: // SFS!
+                    if (fileType == FileType.BootMii) return false; // Invalid dump type for WiiU
+                    nandType = NandType.WiiU;
+                    return true;
+                default:
+                    return false;
             }
+        }
 
+        private bool getKey()
+        {
+            if (fileType == FileType.BootMii)
+            {
+                rom.BaseStream.Seek(0x21000158, SeekOrigin.Begin);
+                if (rom.Read(key, 0, 16) > 0)
+                    return true;
+            }
+            else
+            {
+                key = readOTPfile(Directory.GetCurrentDirectory() + "\\otp.bin");
+                if (key != null)
+                    return true;
+                if (nandType == NandType.Wii)
+                {
+                    key = readKeyfile(Directory.GetCurrentDirectory() + "\\keys.bin");
+                    if (key != null)
+                        return true;
+                }
+            }
             if (Properties.Settings.Default.nand_key.Length == 32)
             {
                 key = strToByte(Properties.Settings.Default.nand_key);
-                msg_Info(string.Format("No new key data found, using manually entered key\n{0}\n\n" + 
+                msg_Info(string.Format("No opt.bin/keys.bin key data found, using manually entered key\n{0}\n\n" + 
                     "MAKE SURE THIS IS THE RIGHT KEY OR YOUR\nEXTRACTED FILES WILL NOT DECRYPT CORRECTLY!", 
                     BitConverter.ToString(key).Replace("-", string.Empty) ));
                 return true;
             }
-            msg_Error("Something went horribly wrong and I can't find the key.\nTry entering it manually from the File menu.");
+            msg_Error("Not found otp.bin/keys.bin (otp.bin for WiiU/vWii NAND, keys.bin for Wii/vWii NAND).\nPut those files in this program directory or enter the key manually from the File menu.");
             return false;
         }
 
         public static byte[] readKeyfile(string path)
         {
             byte[] retval = new byte[16];
-            
+
             if (File.Exists(path))
             {
                 try
@@ -224,30 +289,68 @@ namespace NAND_Extractor
             }
             else
             {
-                msg_Error(string.Format("You tried to open a file that doesn't exist:\n{0}", path));
+                return null;
+            }
+        }
+
+        public static byte[] readOTPfile(string path)
+        {
+            byte[] retval = new byte[16];
+
+            if (File.Exists(path))
+            {
+                try
+                {
+                    BinaryReader br = new BinaryReader(File.Open(path,
+                                FileMode.Open,
+                                FileAccess.Read,
+                                FileShare.Read),
+                                Encoding.ASCII);
+                    if (nandType == NandType.Wii)
+                    {
+                        br.BaseStream.Seek(0x058, SeekOrigin.Begin);
+                    }
+                    else
+                    {
+                        br.BaseStream.Seek(0x170, SeekOrigin.Begin);
+                    }
+                    br.Read(retval, 0, 16);
+                    br.Close();
+                    return retval;
+                }
+                catch
+                {
+                    msg_Error(string.Format("Can't open key.bin:\n{0}\n" +
+                                            "Try closing any program(s) that may be accessing it.",
+                                            path));
+                    return null;
+                }
+            }
+            else
+            {
                 return null;
             }
         }
 
         private Int32 findSuperblock()
         {
-            Int32 loc, current, last = 0;
-            Int32[] n_start = { 0x1FC00000, 0x20BE0000, 0x20BE0000 },
-                    n_end   = { 0x20000000, 0x21000000, 0x21000000 },
-                    n_len   = { 0x40000, 0x42000, 0x42000 };
+            Int32 loc = ((nandType == NandType.Wii) ? 0x7F00 : 0x7C00) * getClusterSize();
+            Int32 end = CLUSTERS_COUNT * getClusterSize();
+            Int32 len = getClusterSize() * 0x10;
+            Int32 current, last = 0;
 
-            rom.BaseStream.Seek(n_start[type] + 4, SeekOrigin.Begin);
+            rom.BaseStream.Seek(loc + 4, SeekOrigin.Begin);
 
-            for (loc = n_start[type]; loc < n_end[type]; loc += n_len[type])
+            for (; loc < end; loc += len)
             {
                 current = (int) bswap(rom.ReadUInt32());
                 
                 if (current > last)
                     last = current;
                 else
-                    return loc - n_len[type];
+                    return loc - len;
 
-                rom.BaseStream.Seek(n_len[type] - 4, SeekOrigin.Current);
+                rom.BaseStream.Seek(len - 4, SeekOrigin.Current);
             }
 
             return -1;
@@ -255,17 +358,14 @@ namespace NAND_Extractor
 
         private byte[] getCluster(UInt16 cluster_entry)
         {
-            Int32[] n_clusterlen = { 0x4000, 0x4200, 0x4200 };
-            Int32[] n_pagelen = { 0x800, 0x840, 0x840 };
-
             byte[] cluster = new byte[0x4000];
-            byte[] page = new byte[ n_pagelen[type] ];
+            byte[] page = new byte[ getPageSize() ];
 
-            rom.BaseStream.Seek(cluster_entry * n_clusterlen[type], SeekOrigin.Begin);
+            rom.BaseStream.Seek(cluster_entry * getClusterSize(), SeekOrigin.Begin);
 
             for (int i = 0; i < 8; i++)
             {
-                page = rom.ReadBytes( n_pagelen[type] );
+                page = rom.ReadBytes( getPageSize() );
                 Buffer.BlockCopy(page, 0, cluster, i * 0x800, 0x800);
             }
 
@@ -283,8 +383,8 @@ namespace NAND_Extractor
             fat_entry += 6;
 
             // location in fat of cluster chain
-            Int32[] n_fat = { 0, 0x20, 0x20 };
-            int loc = loc_fat + ((((fat_entry / 0x400) * n_fat[type]) + fat_entry) * 2);
+            Int32 n_fat = (fileType == FileType.NoECC) ? 0 : 0x20;
+            int loc = loc_fat + ((((fat_entry / 0x400) * n_fat) + fat_entry) * 2);
 
             rom.BaseStream.Seek(loc, SeekOrigin.Begin);
             return bswap(rom.ReadUInt16());
@@ -295,8 +395,8 @@ namespace NAND_Extractor
             fst_t fst = new fst_t();
 
             // compensate for 64 bytes of ecc data every 64 fst entries
-            Int32[] n_fst = { 0, 2, 2 };
-            int loc_entry = (((entry / 0x40) * n_fst[type]) + entry) * 0x20;
+            Int32 n_fst = (fileType == FileType.NoECC) ? 0 : 2;
+            int loc_entry = (((entry / 0x40) * n_fst) + entry) * 0x20;
 
             rom.BaseStream.Seek(loc_fst + loc_entry, SeekOrigin.Begin);
 
