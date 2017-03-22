@@ -298,7 +298,7 @@ namespace NAND_Extractor
             this.Controls.Add(this.menuMain);
             this.MainMenuStrip = this.menuMain;
             this.Name = "nandExtractor";
-            this.Text = "Wii NAND Extractor";
+            this.Text = "Wii U NAND Extractor";
             this.Resize += new System.EventHandler(this.nandExtractor_Resize);
             this.menuMain.ResumeLayout(false);
             this.menuMain.PerformLayout();
